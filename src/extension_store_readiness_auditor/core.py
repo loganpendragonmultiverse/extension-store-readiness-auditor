@@ -5,8 +5,10 @@ import json
 import re
 import zipfile
 from collections.abc import Iterable
+from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlparse
 
 PROJECT = "extension-store-readiness-auditor"
 TARGETS = {"chrome", "firefox", "edge"}
@@ -98,7 +100,77 @@ def _manifest(files: dict[str, bytes]) -> dict[str, Any]:
     return data
 
 
-def analyze(source: Path, targets: set[str]) -> dict[str, Any]:
+def load_policy(path: Path) -> dict[str, Any]:
+    raw = path.read_bytes()
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        raise ValueError("policy profile must be a schema version 1 object")
+    profile_id = data.get("id")
+    if not isinstance(profile_id, str) or not profile_id.strip():
+        raise ValueError("policy profile requires an id")
+    reviewed_at = data.get("reviewed_at")
+    if not isinstance(reviewed_at, str):
+        raise TypeError("policy profile requires a reviewed_at date")
+    try:
+        date.fromisoformat(reviewed_at)
+    except ValueError as exc:
+        raise ValueError("policy profile reviewed_at must be an ISO date") from exc
+    targets = data.get("targets")
+    if (
+        not isinstance(targets, list)
+        or not targets
+        or not all(isinstance(target, str) for target in targets)
+        or not set(targets) <= TARGETS
+    ):
+        raise ValueError(f"policy targets must be selected from: {', '.join(sorted(TARGETS))}")
+    sources = data.get("sources", [])
+    if not isinstance(sources, list):
+        raise TypeError("policy sources must be a list")
+    for source in sources:
+        if not isinstance(source, dict) or not isinstance(source.get("url"), str):
+            raise TypeError("policy source must contain a URL")
+        parsed = urlparse(source["url"])
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("policy source URL must use HTTP or HTTPS")
+        if "title" in source and not isinstance(source["title"], str):
+            raise TypeError("policy source title must be text")
+    for key in ("required_manifest_fields", "required_files"):
+        value = data.get(key, {})
+        if not isinstance(value, dict) or not set(value) <= TARGETS:
+            raise ValueError(f"{key} must map known targets to lists")
+        for target, requirements in value.items():
+            if not isinstance(requirements, list) or not all(
+                isinstance(requirement, str) and requirement.strip() for requirement in requirements
+            ):
+                raise TypeError(f"{key}.{target} must be a string list")
+            if key == "required_files":
+                for requirement in requirements:
+                    if _safe_name(requirement) != requirement.replace("\\", "/"):
+                        raise ValueError(
+                            f"required file must be a normalized package path: {requirement}"
+                        )
+    overrides = data.get("severity_overrides", {})
+    if not isinstance(overrides, dict) or not all(
+        isinstance(code, str) and severity in {"error", "warning"}
+        for code, severity in overrides.items()
+    ):
+        raise ValueError("severity_overrides must map finding codes to error or warning")
+    canonical = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return {**data, "sha256": hashlib.sha256(canonical).hexdigest()}
+
+
+def _manifest_value(manifest: dict[str, Any], dotted_path: str) -> Any:
+    current: Any = manifest
+    for part in dotted_path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def analyze(
+    source: Path, targets: set[str], policy: dict[str, Any] | None = None
+) -> dict[str, Any]:
     unknown = targets - TARGETS
     if not targets or unknown:
         raise ValueError(f"targets must be selected from: {', '.join(sorted(TARGETS))}")
@@ -267,6 +339,37 @@ def analyze(source: Path, targets: set[str]) -> dict[str, Any]:
                     )
                 )
 
+    if policy:
+        policy_targets = targets & set(policy["targets"])
+        for target in sorted(policy_targets):
+            for field in policy.get("required_manifest_fields", {}).get(target, []):
+                value = _manifest_value(manifest, field)
+                if value is None or value == "" or value == [] or value == {}:
+                    findings.append(
+                        _finding(
+                            "error",
+                            "policy-required-manifest",
+                            "The selected policy profile requires this manifest value.",
+                            field,
+                            {target},
+                        )
+                    )
+            for name in policy.get("required_files", {}).get(target, []):
+                if name not in files:
+                    findings.append(
+                        _finding(
+                            "error",
+                            "policy-required-file",
+                            "The selected policy profile requires this package file.",
+                            name,
+                            {target},
+                        )
+                    )
+        overrides = policy.get("severity_overrides", {})
+        for finding in findings:
+            if finding["code"] in overrides:
+                finding["severity"] = overrides[finding["code"]]
+
     findings.sort(key=lambda item: (item["severity"] != "error", item["code"], item["evidence"]))
     counts = {
         level: sum(item["severity"] == level for item in findings) for level in ("error", "warning")
@@ -278,7 +381,7 @@ def analyze(source: Path, targets: set[str]) -> dict[str, Any]:
         )
     ).hexdigest()
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "project": PROJECT,
         "source": source_label,
         "targets": all_targets,
@@ -291,7 +394,50 @@ def analyze(source: Path, targets: set[str]) -> dict[str, Any]:
         },
         "summary": {**counts, "ready": counts["error"] == 0},
         "findings": findings,
+        "policy_profile": (
+            {
+                "id": policy["id"],
+                "reviewed_at": policy["reviewed_at"],
+                "targets": sorted(policy["targets"]),
+                "sources": policy.get("sources", []),
+                "sha256": policy["sha256"],
+            }
+            if policy
+            else None
+        ),
         "boundary": "Static heuristics cannot guarantee marketplace acceptance; recheck current store policies before submission.",
+    }
+
+
+def compare_reports(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
+    if baseline.get("project") != PROJECT or baseline.get("schema_version") not in {1, 2}:
+        raise ValueError("baseline must be an Extension Store Readiness Auditor report")
+
+    def key(finding: dict[str, Any]) -> tuple[str, str, str, tuple[str, ...]]:
+        try:
+            return (
+                str(finding["severity"]),
+                str(finding["code"]),
+                str(finding["evidence"]),
+                tuple(sorted(str(target) for target in finding["targets"])),
+            )
+        except (KeyError, TypeError) as exc:
+            raise ValueError("baseline contains an invalid finding") from exc
+
+    current_by_key = {key(finding): finding for finding in current["findings"]}
+    baseline_by_key = {key(finding): finding for finding in baseline.get("findings", [])}
+    new_keys = sorted(current_by_key.keys() - baseline_by_key.keys())
+    resolved_keys = sorted(baseline_by_key.keys() - current_by_key.keys())
+    unchanged_keys = sorted(current_by_key.keys() & baseline_by_key.keys())
+    return {
+        "new": [current_by_key[item] for item in new_keys],
+        "resolved": [baseline_by_key[item] for item in resolved_keys],
+        "unchanged": [current_by_key[item] for item in unchanged_keys],
+        "summary": {
+            "new": len(new_keys),
+            "resolved": len(resolved_keys),
+            "unchanged": len(unchanged_keys),
+        },
     }
 
 
@@ -308,10 +454,15 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"Targets: {', '.join(report['targets'])}",
         f"Result: {'Ready for human review' if summary['ready'] else 'Errors require correction'}",
         f"Errors: {summary['error']} | Warnings: {summary['warning']}",
-        "",
-        "## Findings",
-        "",
     ]
+    if report.get("policy_profile"):
+        profile = report["policy_profile"]
+        lines.extend(
+            [
+                f"Policy: `{profile['id']}` reviewed {profile['reviewed_at']} (`{profile['sha256']}`)",
+            ]
+        )
+    lines.extend(["", "## Findings", ""])
     if not report["findings"]:
         lines.append("- No static findings.")
     for item in report["findings"]:
@@ -319,5 +470,22 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"- **{item['severity'].upper()} {item['code']}** — {item['message']} "
             f"Evidence: `{item['evidence']}`. Targets: {', '.join(item['targets'])}."
         )
+    if "comparison" in report:
+        comparison = report["comparison"]
+        lines.extend(
+            [
+                "",
+                "## Baseline Comparison",
+                "",
+                (
+                    f"New: {comparison['summary']['new']} | "
+                    f"Resolved: {comparison['summary']['resolved']} | "
+                    f"Unchanged: {comparison['summary']['unchanged']}"
+                ),
+            ]
+        )
+        for state in ("new", "resolved"):
+            for item in comparison[state]:
+                lines.append(f"- **{state.title()} {item['code']}** — `{item['evidence']}`")
     lines += ["", "## Boundary", "", report["boundary"], ""]
     return "\n".join(lines)
