@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "example-2026-08",
+  "reviewed_at": "2026-08-06",
+  "targets": ["chrome", "firefox", "edge"],
+  "sources": [
+    {
+      "title": "Chrome Web Store program policies",
+      "url": "https://developer.chrome.com/docs/webstore/program-policies/"
+    },
+    {
+      "title": "Mozilla Add-on policies",
+      "url": "https://extensionworkshop.com/documentation/publish/add-on-policies/"
+    },
+    {
+      "title": "Microsoft Edge Add-ons policies",
+      "url": "https://learn.microsoft.com/en-us/legal/microsoft-edge/extensions/developer-policies"
+    }
+  ],
+  "required_manifest_fields": {
+    "chrome": ["name", "description", "version"],
+    "firefox": ["name", "description", "version", "browser_specific_settings.gecko.id"],
+    "edge": ["name", "description", "version"]
+  },
+  "required_files": {
+    "chrome": [],
+    "firefox": [],
+    "edge": []
+  },
+  "severity_overrides": {
+    "broad-host-access": "error"
+  }
+}

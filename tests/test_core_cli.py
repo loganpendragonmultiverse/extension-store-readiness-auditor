@@ -1,11 +1,18 @@
 import json
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from extension_store_readiness_auditor.cli import main
-from extension_store_readiness_auditor.core import analyze, render_json, render_markdown
+from extension_store_readiness_auditor.core import (
+    analyze,
+    compare_reports,
+    load_policy,
+    render_json,
+    render_markdown,
+)
 
 
 def valid_package(root: Path) -> None:
@@ -33,7 +40,8 @@ def test_clean_directory_is_ready(tmp_path: Path) -> None:
     report = analyze(tmp_path, {"chrome", "firefox", "edge"})
     assert report["summary"] == {"error": 0, "warning": 0, "ready": True}
     assert "Ready for human review" in render_markdown(report)
-    assert '"schema_version": 1' in render_json(report)
+    assert '"schema_version": 2' in render_json(report)
+    assert report["policy_profile"] is None
 
 
 def test_risky_package_reports_evidence(tmp_path: Path) -> None:
@@ -149,3 +157,110 @@ def test_archive_rejects_unsafe_duplicate_and_invalid_sources(tmp_path: Path) ->
         archive.writestr("manifest.json", b"not-json")
     with pytest.raises(ValueError, match="valid UTF-8 JSON"):
         analyze(folder, {"chrome"})
+
+
+def policy_profile() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "id": "reviewed-policy",
+        "reviewed_at": "2026-08-06",
+        "targets": ["chrome", "firefox"],
+        "sources": [
+            {
+                "title": "Store policy",
+                "url": "https://developer.example.test/store-policy",
+            }
+        ],
+        "required_manifest_fields": {
+            "chrome": ["minimum_chrome_version"],
+            "firefox": ["browser_specific_settings.gecko.id"],
+        },
+        "required_files": {"chrome": ["store/privacy.md"], "firefox": []},
+        "severity_overrides": {"sensitive-permission": "error"},
+    }
+
+
+def test_policy_profile_requirements_overrides_and_fingerprint(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    valid_package(package)
+    manifest_path = package / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["permissions"] = ["debugger"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    profile_path = tmp_path / "policy.json"
+    profile_path.write_text(json.dumps(policy_profile()), encoding="utf-8")
+
+    policy = load_policy(profile_path)
+    report = analyze(package, {"chrome", "firefox"}, policy)
+    findings = {(item["code"], item["evidence"]): item for item in report["findings"]}
+    assert findings[("sensitive-permission", "debugger")]["severity"] == "error"
+    assert ("policy-required-manifest", "minimum_chrome_version") in findings
+    assert ("policy-required-file", "store/privacy.md") in findings
+    assert report["policy_profile"]["sha256"] == policy["sha256"]
+    assert len(policy["sha256"]) == 64
+    assert "Policy: `reviewed-policy` reviewed 2026-08-06" in render_markdown(report)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "error"),
+    [
+        (lambda profile: profile.update(schema_version=2), "schema version 1"),
+        (lambda profile: profile.update(id=""), "requires an id"),
+        (lambda profile: profile.update(reviewed_at="August"), "ISO date"),
+        (lambda profile: profile.update(targets=["safari"]), "policy targets"),
+        (lambda profile: profile.update(sources={}), "sources must be a list"),
+        (
+            lambda profile: profile["sources"][0].update(url="file:///policy"),
+            "HTTP or HTTPS",
+        ),
+        (
+            lambda profile: profile["required_files"].update(chrome=["../private.txt"]),
+            "unsafe package member path",
+        ),
+        (
+            lambda profile: profile.update(severity_overrides={"remote-code": "notice"}),
+            "severity_overrides",
+        ),
+    ],
+)
+def test_invalid_policy_profiles(tmp_path: Path, mutate: Any, error: str) -> None:
+    profile = policy_profile()
+    mutate(profile)
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps(profile), encoding="utf-8")
+    with pytest.raises((TypeError, ValueError), match=error):
+        load_policy(path)
+
+
+def test_baseline_comparison_and_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    valid_package(package)
+    baseline = analyze(package, {"chrome"})
+    (package / "worker.js").write_text("eval('remote')", encoding="utf-8")
+    current = analyze(package, {"chrome"})
+    comparison = compare_reports(current, baseline)
+    assert comparison["summary"] == {"new": 1, "resolved": 0, "unchanged": 0}
+    assert comparison["new"][0]["code"] == "remote-code"
+    assert compare_reports(baseline, current)["summary"]["resolved"] == 1
+
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(render_json(baseline), encoding="utf-8")
+    assert main([str(package), "--baseline", str(baseline_path), "--format", "json"]) == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["comparison"]["summary"]["new"] == 1
+    output["comparison"] = comparison
+    assert "## Baseline Comparison" in render_markdown(output)
+
+
+def test_rejects_invalid_baselines(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    valid_package(package)
+    current = analyze(package, {"chrome"})
+    with pytest.raises(ValueError, match="baseline"):
+        compare_reports(current, {"project": "other", "schema_version": 2})
+    invalid = {**current, "findings": [{"code": "broken"}]}
+    with pytest.raises(ValueError, match="invalid finding"):
+        compare_reports(current, invalid)
