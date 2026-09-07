@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.0 - 2026-09-07
+
+- Add permission-version diffs, declared-versus-observed namespace evidence, policy-age checklists and CRX/XPI container fixtures.
+- Added regression coverage for the audited behavior and invalid inputs.
+
 ## 1.1.0 - 2026-08-06
 
 - Added versioned local policy profiles with review dates, source links, store targets, required

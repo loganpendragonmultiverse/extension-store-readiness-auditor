@@ -3,12 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import struct
 import zipfile
 from collections.abc import Iterable
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
+
+from .review import permission_review, policy_review
 
 PROJECT = "extension-store-readiness-auditor"
 TARGETS = {"chrome", "firefox", "edge"}
@@ -57,8 +60,14 @@ def _read_package(source: Path) -> tuple[dict[str, bytes], str]:
     source = source.resolve()
     if source.is_dir():
         files: dict[str, bytes] = {}
+        total = 0
         for path in sorted(source.rglob("*")):
+            if path.is_symlink():
+                raise ValueError("package symlinks are unsupported")
             if path.is_file():
+                total += path.stat().st_size
+                if total > MAX_UNCOMPRESSED:
+                    raise ValueError("package exceeds the uncompressed-size limit")
                 relative = path.relative_to(source).as_posix()
                 files[relative] = path.read_bytes()
                 if len(files) > MAX_FILES:
@@ -66,6 +75,26 @@ def _read_package(source: Path) -> tuple[dict[str, bytes], str]:
         return files, str(source)
     if source.is_file() and source.suffix.casefold() in {".zip", ".xpi", ".crx"}:
         files = {}
+        if source.stat().st_size > MAX_UNCOMPRESSED:
+            raise ValueError("package container exceeds the size limit")
+        if source.suffix.casefold() == ".crx":
+            with source.open("rb") as handle:
+                header = handle.read(16)
+                if len(header) < 12 or header[:4] != b"Cr24":
+                    raise ValueError("invalid CRX header")
+                version = struct.unpack("<I", header[4:8])[0]
+                if version == 3:
+                    offset = 12 + struct.unpack("<I", header[8:12])[0]
+                elif version == 2 and len(header) == 16:
+                    public, signature = struct.unpack("<II", header[8:16])
+                    offset = 16 + public + signature
+                else:
+                    raise ValueError("unsupported CRX version")
+                if offset > 16 * 1024 * 1024 or offset >= source.stat().st_size:
+                    raise ValueError("invalid CRX header length")
+                handle.seek(offset)
+                if handle.read(4) != b"PK\x03\x04":
+                    raise ValueError("CRX payload is not a ZIP archive")
         with zipfile.ZipFile(source) as archive:
             infos = archive.infolist()
             if len(infos) > MAX_FILES:
@@ -169,7 +198,11 @@ def _manifest_value(manifest: dict[str, Any], dotted_path: str) -> Any:
 
 
 def analyze(
-    source: Path, targets: set[str], policy: dict[str, Any] | None = None
+    source: Path,
+    targets: set[str],
+    policy: dict[str, Any] | None = None,
+    as_of: str | None = None,
+    policy_max_age: int = 90,
 ) -> dict[str, Any]:
     unknown = targets - TARGETS
     if not targets or unknown:
@@ -309,7 +342,9 @@ def analyze(
         if isinstance(manifest.get("browser_specific_settings", {}), dict)
         else {}
     )
-    if "firefox" in targets and not isinstance(gecko.get("id"), str):
+    if "firefox" in targets and (
+        not isinstance(gecko, dict) or not isinstance(gecko.get("id"), str)
+    ):
         findings.append(
             _finding(
                 "warning",
@@ -382,6 +417,11 @@ def analyze(
     ).hexdigest()
     return {
         "schema_version": 2,
+        "permission_review": permission_review(manifest, files),
+        "policy_review": policy_review(
+            policy, as_of or datetime.now(timezone.utc).date().isoformat(), policy_max_age
+        ),
+        "archive_signature": "not-verified; container inspection does not authenticate CRX/XPI signatures",
         "project": PROJECT,
         "source": source_label,
         "targets": all_targets,
@@ -487,5 +527,22 @@ def render_markdown(report: dict[str, Any]) -> str:
         for state in ("new", "resolved"):
             for item in comparison[state]:
                 lines.append(f"- **{state.title()} {item['code']}** — `{item['evidence']}`")
-    lines += ["", "## Boundary", "", report["boundary"], ""]
+    lines += [
+        "",
+        "## Permission and policy review",
+        "",
+        json.dumps(
+            {
+                "permissions": report.get("permission_review"),
+                "permission_diff": report.get("permission_diff"),
+                "policy": report.get("policy_review"),
+            },
+            indent=2,
+        ),
+        "",
+        "## Boundary",
+        "",
+        report["boundary"],
+        "",
+    ]
     return "\n".join(lines)
