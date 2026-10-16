@@ -197,6 +197,77 @@ def _manifest_value(manifest: dict[str, Any], dotted_path: str) -> Any:
     return current
 
 
+def _entrypoint_findings(
+    manifest: dict[str, Any], files: dict[str, bytes], targets: set[str]
+) -> list[dict[str, Any]]:
+    """Check only literal package members; never resolve or execute references."""
+    findings: list[dict[str, Any]] = []
+
+    def error(code: str, location: str, message: str) -> None:
+        findings.append(_finding("error", code, message, location, targets))
+
+    def reference(value: Any, location: str) -> None:
+        if not isinstance(value, str) or not value:
+            error("entrypoint-shape", location, "Entrypoint must be a nonempty local package path.")
+            return
+        parts = value.split("/")
+        if (
+            any(part in {"", ".", ".."} for part in parts)
+            or any(character in value for character in ("\\", ":", "?", "#", "%"))
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            error(
+                "entrypoint-path",
+                location,
+                "Entrypoint must be an unambiguous relative package path without URL syntax.",
+            )
+        elif value not in files:
+            error("entrypoint-missing", location, "Declared entrypoint is absent from the package.")
+
+    for parent, key in (
+        ("background", "service_worker"),
+        ("action", "default_popup"),
+        ("browser_action", "default_popup"),
+        ("page_action", "default_popup"),
+        ("options_ui", "page"),
+    ):
+        if parent not in manifest:
+            continue
+        value = manifest[parent]
+        if not isinstance(value, dict):
+            error("entrypoint-shape", parent, "Entrypoint container must be an object.")
+        elif key in value:
+            # Chromium treats an empty popup as no popup, not a file reference.
+            if key == "default_popup" and value[key] == "":
+                continue
+            reference(value[key], f"{parent}.{key}")
+    for key in ("options_page", "devtools_page"):
+        if key in manifest:
+            reference(manifest[key], key)
+    if "content_scripts" in manifest:
+        scripts = manifest["content_scripts"]
+        if not isinstance(scripts, list):
+            error("entrypoint-shape", "content_scripts", "Content scripts must be an array.")
+        else:
+            for index, script in enumerate(scripts):
+                location = f"content_scripts.{index}"
+                if not isinstance(script, dict):
+                    error("entrypoint-shape", location, "Content script must be an object.")
+                    continue
+                for key in ("js", "css"):
+                    if key not in script:
+                        continue
+                    values = script[key]
+                    if not isinstance(values, list):
+                        error(
+                            "entrypoint-shape", f"{location}.{key}", "Entrypoints must be an array."
+                        )
+                        continue
+                    for item, value in enumerate(values):
+                        reference(value, f"{location}.{key}.{item}")
+    return findings
+
+
 def analyze(
     source: Path,
     targets: set[str],
@@ -210,6 +281,7 @@ def analyze(
     files, source_label = _read_package(source)
     manifest = _manifest(files)
     findings: list[dict[str, Any]] = []
+    findings.extend(_entrypoint_findings(manifest, files, targets))
     all_targets = sorted(targets)
 
     if manifest.get("manifest_version") != 3:

@@ -1,2 +1,4 @@
 include README.md LICENSE CHANGELOG.md
 recursive-include examples *.json
+
+include README.md CHANGELOG.md DEVELOPMENT.md TESTING.md LICENSE

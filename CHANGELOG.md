@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.0 - 2026-10-16
+
+- Preserve omitted or empty action popup declarations as valid no-popup behavior.
+
+- Validate declared local extension entrypoints against the bounded package inventory.
+- Add synthetic regression coverage and packaged development/testing documentation.
+
 ## 1.2.0 - 2026-09-07
 
 - Add permission-version diffs, declared-versus-observed namespace evidence, policy-age checklists and CRX/XPI container fixtures.
