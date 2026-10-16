@@ -11,3 +11,5 @@ Run the complete existing suite plus the new regression fixtures. Confirm the do
 ## 1.3.0 — 2026-10-16
 
 Use synthetic directory, ZIP, XPI and CRX fixtures for complete and missing entrypoints, malformed containers and values, escaping/absolute/remote references and source preservation. Run existing policy, permission, archive and CLI tests.
+
+The popup matrix covers omitted, empty, existing, missing and non-string declarations for action, browser_action and page_action across directories, ZIP, XPI and CRX containers.

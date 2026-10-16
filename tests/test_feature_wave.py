@@ -143,3 +143,34 @@ def test_missing_each_entrypoint(tmp_path, kind, manifest, location):
         f for f in analyze(source, {"chrome"})["findings"] if f["code"] == "entrypoint-missing"
     )
     assert finding["evidence"] == location
+
+
+@pytest.mark.parametrize("kind", ["directory", "zip", "xpi", "crx"])
+@pytest.mark.parametrize("action", ["action", "browser_action", "page_action"])
+@pytest.mark.parametrize(
+    "declaration,expected",
+    [
+        pytest.param({}, None, id="omitted-popup"),
+        pytest.param({"default_popup": ""}, None, id="empty-popup"),
+        pytest.param({"default_popup": "popup.html"}, None, id="existing-popup"),
+        pytest.param({"default_popup": "missing.html"}, "entrypoint-missing", id="missing-popup"),
+        pytest.param({"default_popup": None}, "entrypoint-shape", id="null-popup"),
+        pytest.param({"default_popup": 17}, "entrypoint-shape", id="numeric-popup"),
+        pytest.param({"default_popup": []}, "entrypoint-shape", id="array-popup"),
+        pytest.param({"default_popup": {}}, "entrypoint-shape", id="object-popup"),
+        pytest.param({"default_popup": False}, "entrypoint-shape", id="boolean-popup"),
+    ],
+)
+def test_popup_declarations(tmp_path, kind, action, declaration, expected):
+    source = package(tmp_path, kind, {action: declaration}, {"popup.html": b"<p>Synthetic</p>"})
+    findings = [
+        finding
+        for finding in analyze(source, {"chrome"})["findings"]
+        if finding["code"].startswith("entrypoint-")
+    ]
+    if expected is None:
+        assert findings == []
+    else:
+        assert len(findings) == 1
+        assert findings[0]["code"] == expected
+        assert findings[0]["evidence"] == f"{action}.default_popup"

@@ -237,6 +237,9 @@ def _entrypoint_findings(
         if not isinstance(value, dict):
             error("entrypoint-shape", parent, "Entrypoint container must be an object.")
         elif key in value:
+            # Chromium treats an empty popup as no popup, not a file reference.
+            if key == "default_popup" and value[key] == "":
+                continue
             reference(value[key], f"{parent}.{key}")
     for key in ("options_page", "devtools_page"):
         if key in manifest:

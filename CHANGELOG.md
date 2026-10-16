@@ -2,6 +2,8 @@
 
 ## 1.3.0 - 2026-10-16
 
+- Preserve omitted or empty action popup declarations as valid no-popup behavior.
+
 - Validate declared local extension entrypoints against the bounded package inventory.
 - Add synthetic regression coverage and packaged development/testing documentation.
 
