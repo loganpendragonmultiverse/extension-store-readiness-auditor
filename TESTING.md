@@ -7,3 +7,7 @@ Tests cover unpacked and archived packages, safe archive paths, root manifests, 
 ## 1.2.0 regression acceptance
 
 Run the complete existing suite plus the new regression fixtures. Confirm the documented command produces the selected output, malformed input remains actionable, and source files remain unchanged. Add permission-version diffs, declared-versus-observed namespace evidence, policy-age checklists and CRX/XPI container fixtures.
+
+## 1.3.0 — 2026-10-16
+
+Use synthetic directory, ZIP, XPI and CRX fixtures for complete and missing entrypoints, malformed containers and values, escaping/absolute/remote references and source preservation. Run existing policy, permission, archive and CLI tests.

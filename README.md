@@ -53,3 +53,10 @@ extension-store-audit ./extension --policy policy.json --as-of 2026-09-07 --base
 ```
 
 Reports inventory required/optional API and host permissions. Baselines with permission inventories show added/removed declarations; older baselines explicitly report comparison unavailable. JavaScript namespace text patterns include file/line evidence but may match comments or miss dynamic code: absence is not proof of unused permission, and a namespace match is not proof that its permission is needed. --as-of and --policy-max-age (default 90 days) classify the operator-authored policy review date and list sources requiring manual recheck; no policy sources are fetched or refreshed. CRX2/CRX3 header bounds and ZIP payload offsets are validated, with generated CRX/XPI fixtures. Signatures, package authenticity and marketplace acceptance are not verified. Unpacked size limits and symlink rejection preserve bounded local inspection.
+
+
+## 1.3.0 — 2026-10-16: Local entrypoint validation
+
+Validate declared local extension entrypoints against the bounded package inventory.
+
+Checks cover `background.service_worker`, content-script `js` and `css` arrays, `action`, `browser_action` and `page_action` popups, `options_page`, `options_ui.page` and `devtools_page`. Stable errors `entrypoint-shape`, `entrypoint-path` and `entrypoint-missing` point to the manifest field. References must be nonempty, exact relative member paths. Absolute paths, traversal, backslashes, URL schemes, queries/fragments, percent-encoded ambiguity and control characters are rejected. No JavaScript imports are resolved, no entrypoint code runs, no external files are read, and no URLs are fetched. This verifies declared membership only, not runtime behavior or marketplace acceptance.
