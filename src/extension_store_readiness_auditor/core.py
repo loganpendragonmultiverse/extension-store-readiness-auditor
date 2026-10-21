@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
+from ._archive import read_member
 from ._io import (
     checked_path,
     code_span,
@@ -149,20 +150,20 @@ def _read_package(source: Path) -> tuple[dict[str, bytes], str]:
                 # ZipInfo.filename normalizes platform separators on Windows;
                 # orig_filename preserves the actual archive spelling to validate.
                 raw_name = info.orig_filename
-                if info.is_dir():
-                    register(raw_name.rstrip("/"), "directory")
-                    continue
-                name = register(raw_name)
+                is_directory = info.is_dir()
+                name = register(
+                    raw_name.rstrip("/") if is_directory else raw_name,
+                    "directory" if is_directory else "file",
+                )
+                limit = 0 if is_directory else info.file_size
                 try:
-                    with archive.open(info) as member:
-                        raw = member.read(info.file_size + 1)
+                    raw = read_member(archive, info, limit, MAX_UNCOMPRESSED)
                 except (RuntimeError, NotImplementedError) as exc:
                     raise ValueError(
                         "package member encryption/compression is unsupported"
                     ) from exc
-                if len(raw) != info.file_size:
-                    raise ValueError("package member size differs from its declared size")
-                files[name] = raw
+                if not is_directory:
+                    files[name] = raw
         return files, str(source)
     raise ValueError("source must be an extension directory or ZIP, XPI, or CRX archive")
 

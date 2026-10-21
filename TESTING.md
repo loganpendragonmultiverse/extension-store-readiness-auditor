@@ -14,7 +14,7 @@ Use synthetic directory, ZIP, XPI and CRX fixtures for complete and missing entr
 
 The popup matrix covers omitted, empty, existing, missing and non-string declarations for action, browser_action and page_action across directories, ZIP, XPI and CRX containers.
 
-## 1.4.0 — bounded package and target-specific review
+## 1.4.1 — bounded package and target-specific review
 
 Built-in store-version checks are an explicitly dated 2026-10-21 snapshot for **new submissions**. Firefox accepts Manifest V2 or V3; Chrome and Edge new submissions require V3. Version strings use one to four unpadded numeric components: Firefox's documented maximum is nine digits per component, while the Chromium checks cap components at 65535 and reject all-zero versions. Mixed-target findings name only affected targets. These checks are not a complete manifest schema, runtime test, store-policy refresh or approval guarantee. Existing Edge MV2 updates and enterprise/browser support schedules are outside the new-submission model.
 
@@ -29,3 +29,5 @@ Installed examples are under `share/doc/extension-store-readiness-auditor/exampl
 Executable CSP heuristics inspect extension-page script, worker, object and fallback directives. Explicit image/connection destinations and the separate sandbox policy do not alone count as executable extension-page evidence. This is not full browser CSP evaluation. Root manifest spelling must be exactly `manifest.json`.
 
 Malformed archive fixtures preserve exact stored member names on every host OS; assertions check raw ZIP bytes and original names before expecting rejection.
+
+Complete ZIP members are validated from their raw compressed spans, including stream end, actual size and CRC; directory members must decode to zero bytes. Stored, Deflate, BZIP2 and LZMA remain supported, with Zstandard when the Python standard library provides it. Codec dictionaries/windows are capped at 512 MiB in addition to the existing container and aggregate decoded limits.

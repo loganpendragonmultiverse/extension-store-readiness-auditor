@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.1 - 2026-10-21
+
+- Validate complete bounded compressed streams, directory payloads and local header consistency before trusting ZIP member evidence.
+- Retain existing codecs, raw member-name validation and aggregate limits.
+- Version 1.4.0 remained a tag-only candidate; public release was withheld after complete-stream artifact review.
+
 ## 1.4.0 - 2026-10-21
 
 - Validate raw archive member spelling consistently on Windows and Unix before separator normalization.
