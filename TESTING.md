@@ -31,3 +31,7 @@ Executable CSP heuristics inspect extension-page script, worker, object and fall
 Malformed archive fixtures preserve exact stored member names on every host OS; assertions check raw ZIP bytes and original names before expecting rejection.
 
 Complete ZIP members are validated from their raw compressed spans, including stream end, actual size and CRC; directory members must decode to zero bytes. Stored, Deflate, BZIP2 and LZMA remain supported, with Zstandard when the Python standard library provides it. Codec dictionaries/windows are capped at 512 MiB in addition to the existing container and aggregate decoded limits.
+
+## 1.4.2: Release artifact verification
+
+The tag workflow checks that the stable tag, project metadata and runtime version agree before building. It runs the full existing quality suite and dependency audit, verifies wheel and source-distribution metadata, and writes SHA256SUMS from those exact two payloads. Native PR/main checks and independent installed-artifact acceptance remain required before publication. This maintenance release preserves runtime behavior and supported Python versions.

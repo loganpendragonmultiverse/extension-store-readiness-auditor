@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.2 — 2026-10-21
+
+- Require tag, package and runtime version identity before release builds.
+- Run complete quality checks and dependency audit in the pinned tag workflow.
+- Verify built wheel/source metadata and checksum the exact payloads.
+- Retain all complete ZIP stream validation and the original native support matrix.
+
 ## 1.4.1 - 2026-10-21
 
 - Validate complete bounded compressed streams, directory payloads and local header consistency before trusting ZIP member evidence.
