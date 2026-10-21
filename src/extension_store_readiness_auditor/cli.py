@@ -6,6 +6,7 @@ import sys
 import zipfile
 from pathlib import Path
 
+from ._io import load_json, preflight_output, write_new_text
 from .core import TARGETS, analyze, compare_reports, load_policy, render_json, render_markdown
 from .review import permission_diff
 
@@ -26,21 +27,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--policy-max-age", type=int, default=90)
     args = parser.parse_args(argv)
     try:
+        if args.output:
+            preflight_output(args.output)
         policy = load_policy(args.policy) if args.policy else None
         report = analyze(
             args.source, set(args.targets or TARGETS), policy, args.as_of, args.policy_max_age
         )
         if args.baseline:
-            baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
+            baseline = load_json(args.baseline)
             if not isinstance(baseline, dict):
                 raise TypeError("baseline report must contain an object")
             report["comparison"] = compare_reports(report, baseline)
             report["permission_diff"] = permission_diff(report["permission_review"], baseline)
         rendered = render_json(report) if args.format == "json" else render_markdown(report)
         if args.output:
-            if args.output.exists():
-                raise ValueError(f"output already exists: {args.output}")
-            args.output.write_text(rendered, encoding="utf-8")
+            write_new_text(args.output, rendered)
         else:
             sys.stdout.write(rendered)
     except (

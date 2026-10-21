@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "extension-store-readiness-auditor"
-version = "1.3.0"
+version = "1.4.0"
 description = "Audit browser-extension packages for cross-store submission risks."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -38,3 +38,5 @@ addopts = "--cov=extension_store_readiness_auditor --cov-branch --cov-report=ter
 
 [tool.setuptools.data-files]
 "share/doc/extension-store-readiness-auditor" = ["README.md", "CHANGELOG.md", "DEVELOPMENT.md", "TESTING.md", "LICENSE"]
+
+"share/doc/extension-store-readiness-auditor/examples" = ["examples/manifest.json", "examples/policy-profile.json"]
