@@ -18,7 +18,7 @@ Checks cover `background.service_worker`, content-script `js` and `css` arrays, 
 
 Popup compatibility is backed by Chromium's parameterized [EmptyDefaultPopup regression](https://chromium.googlesource.com/chromium/src/+/0fda5ad17555ca8e1d06b585587ea021b8a10918/extensions/common/manifest_handlers/extension_action_handler_unittest.cc#362) for action, browser_action and page_action. Null and non-string popup values remain malformed; nonempty missing paths remain errors.
 
-## 1.4.0 — bounded package and target-specific review
+## 1.4.1 — bounded package and target-specific review
 
 Built-in store-version checks are an explicitly dated 2026-10-21 snapshot for **new submissions**. Firefox accepts Manifest V2 or V3; Chrome and Edge new submissions require V3. Version strings use one to four unpadded numeric components: Firefox's documented maximum is nine digits per component, while the Chromium checks cap components at 65535 and reject all-zero versions. Mixed-target findings name only affected targets. These checks are not a complete manifest schema, runtime test, store-policy refresh or approval guarantee. Existing Edge MV2 updates and enterprise/browser support schedules are outside the new-submission model.
 
@@ -31,3 +31,5 @@ Baselines require explicit findings and a valid selected target scope. Compariso
 Installed examples are under `share/doc/extension-store-readiness-auditor/examples` in the installation prefix. Audit that directory for a small offline demonstration; it intentionally has no icon, producing a review warning rather than referencing a nonexistent asset. It is a static auditor fixture, not an extension runtime acceptance claim.
 
 Executable CSP heuristics inspect extension-page script, worker, object and fallback directives. Explicit image/connection destinations and the separate sandbox policy do not alone count as executable extension-page evidence. This is not full browser CSP evaluation. Root manifest spelling must be exactly `manifest.json`.
+
+Complete ZIP members are validated from their raw compressed spans, including stream end, actual size and CRC; directory members must decode to zero bytes. Stored, Deflate, BZIP2 and LZMA remain supported, with Zstandard when the Python standard library provides it. Codec dictionaries/windows are capped at 512 MiB in addition to the existing container and aggregate decoded limits.
