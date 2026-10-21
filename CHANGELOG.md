@@ -2,6 +2,8 @@
 
 ## 1.4.0 - 2026-10-21
 
+- Validate raw archive member spelling consistently on Windows and Unix before separator normalization.
+
 - Keep repeated declarations/policy requirements baseline-compatible and scan namespace line evidence in linear text intervals.
 
 - Add dated, target-specific manifest/version checks and optional-permission risk evidence for new submissions.

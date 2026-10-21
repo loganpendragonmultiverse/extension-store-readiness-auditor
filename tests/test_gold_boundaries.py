@@ -129,7 +129,12 @@ def test_archive_rejects_ambiguous_member_names(tmp_path, name):
     p = tmp_path / "fixture.zip"
     with zipfile.ZipFile(p, "w") as z:
         z.writestr("manifest.json", "{}")
-        z.writestr(name, "fixture")
+        member = zipfile.ZipInfo("raw-member")
+        member.filename = name  # Preserve exact adversarial bytes on every host OS.
+        z.writestr(member, "fixture")
+    assert name.encode("utf-8") in p.read_bytes()
+    with zipfile.ZipFile(p) as archive:
+        assert archive.infolist()[1].orig_filename == name
     with pytest.raises(ValueError, match="unsafe"):
         core.analyze(p, {"chrome"})
 

@@ -27,3 +27,5 @@ Baselines require explicit findings and a valid selected target scope. Compariso
 Installed examples are under `share/doc/extension-store-readiness-auditor/examples` in the installation prefix. Audit that directory for a small offline demonstration; it intentionally has no icon, producing a review warning rather than referencing a nonexistent asset. It is a static auditor fixture, not an extension runtime acceptance claim.
 
 Executable CSP heuristics inspect extension-page script, worker, object and fallback directives. Explicit image/connection destinations and the separate sandbox policy do not alone count as executable extension-page evidence. This is not full browser CSP evaluation. Root manifest spelling must be exactly `manifest.json`.
+
+Malformed archive fixtures preserve exact stored member names on every host OS; assertions check raw ZIP bytes and original names before expecting rejection.

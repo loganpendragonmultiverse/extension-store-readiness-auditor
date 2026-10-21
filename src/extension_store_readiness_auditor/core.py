@@ -146,10 +146,13 @@ def _read_package(source: Path) -> tuple[dict[str, bytes], str]:
                     raise ValueError("package symlinks and special files are unsupported")
                 if info.flag_bits & 1:
                     raise ValueError("encrypted package members are unsupported")
+                # ZipInfo.filename normalizes platform separators on Windows;
+                # orig_filename preserves the actual archive spelling to validate.
+                raw_name = info.orig_filename
                 if info.is_dir():
-                    register(info.filename.rstrip("/"), "directory")
+                    register(raw_name.rstrip("/"), "directory")
                     continue
-                name = register(info.filename)
+                name = register(raw_name)
                 try:
                     with archive.open(info) as member:
                         raw = member.read(info.file_size + 1)
