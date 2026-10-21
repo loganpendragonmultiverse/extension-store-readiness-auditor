@@ -22,10 +22,12 @@ def permission_review(manifest: dict[str, Any], files: dict[str, bytes]) -> dict
     for name, content in sorted(files.items()):
         if name.lower().endswith((".js", ".mjs", ".cjs")):
             text = content.decode("utf-8", errors="replace")
+            previous_end = 0
+            line = 1
             for match in API.finditer(text):
-                observations.setdefault(match.group(1), []).append(
-                    {"file": name, "line": text.count("\n", 0, match.start()) + 1}
-                )
+                line += text.count("\n", previous_end, match.start())
+                previous_end = match.start()
+                observations.setdefault(match.group(1), []).append({"file": name, "line": line})
     evidence = []
     for permission in sorted(set(declared["permissions"] + declared["optional_permissions"])):
         namespace = permission.split(".")[0]
@@ -48,7 +50,15 @@ def permission_review(manifest: dict[str, Any], files: dict[str, bytes]) -> dict
 
 
 def permission_diff(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
-    old = baseline.get("permission_review", {}).get("declared")
+    review = baseline.get("permission_review")
+    if current.get("unsupported_fields") or (
+        isinstance(review, dict) and review.get("unsupported_fields")
+    ):
+        return {
+            "status": "unavailable",
+            "reason": "Current or baseline permission declarations have unsupported shapes",
+        }
+    old = review.get("declared") if isinstance(review, dict) else None
     if not isinstance(old, dict) or any(
         not isinstance(old.get(k), list) or any(not isinstance(v, str) for v in old[k])
         for k in FIELDS
@@ -70,7 +80,11 @@ def permission_diff(current: dict[str, Any], baseline: dict[str, Any]) -> dict[s
 
 
 def policy_review(policy: dict[str, Any] | None, as_of: str, max_age: int = 90) -> dict[str, Any]:
+    if not isinstance(as_of, str):
+        raise TypeError("as_of must be a canonical ISO date")
     today = date.fromisoformat(as_of)
+    if today.isoformat() != as_of:
+        raise ValueError("as_of must be a canonical ISO date")
     if not isinstance(max_age, int) or isinstance(max_age, bool) or max_age < 1:
         raise ValueError("policy maximum age must be a positive integer")
     if policy is None:

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 import struct
 import zipfile
 from collections.abc import Iterable
@@ -11,6 +13,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
+from ._io import (
+    checked_path,
+    code_span,
+    json_fence,
+    load_json,
+    parse_json,
+    read_bytes,
+    validate_json,
+)
 from .review import permission_review, policy_review
 
 PROJECT = "extension-store-readiness-auditor"
@@ -32,7 +43,7 @@ REMOTE_CODE = re.compile(
     r"import\s*\(\s*['\"]https?://)",
     re.IGNORECASE,
 )
-VERSION = re.compile(r"^[0-9]+(?:\.[0-9]+){0,3}$")
+VERSION = re.compile(r"^(0|[1-9][0-9]{0,8})(?:\.(0|[1-9][0-9]{0,8})){0,3}$")
 MAX_FILES = 20_000
 MAX_UNCOMPRESSED = 500 * 1024 * 1024
 
@@ -50,28 +61,56 @@ def _finding(
 
 
 def _safe_name(name: str) -> str:
-    normalized = PurePosixPath(name.replace("\\", "/"))
-    if normalized.is_absolute() or ".." in normalized.parts or not normalized.parts:
+    if (
+        not name
+        or any(part in {"", ".", ".."} for part in name.split("/"))
+        or any(c in name for c in ("\\", ":"))
+        or any(ord(c) < 32 or ord(c) == 127 for c in name)
+    ):
         raise ValueError(f"unsafe package member path: {name}")
-    return normalized.as_posix()
+    return name
 
 
 def _read_package(source: Path) -> tuple[dict[str, bytes], str]:
-    source = source.resolve()
+    source = checked_path(source).resolve()
+    names: dict[str, tuple[str, str]] = {}
+
+    def register(name: str, kind: str = "file") -> str:
+        name = _safe_name(name)
+        parts = name.split("/")
+        for index in range(len(parts)):
+            prefix = "/".join(parts[: index + 1])
+            node_kind = kind if index == len(parts) - 1 else "directory"
+            old = names.get(prefix.casefold())
+            if old and (old[0] != prefix or old[1] != node_kind or node_kind == "file"):
+                raise ValueError(f"duplicate or conflicting package member path: {name}")
+            names[prefix.casefold()] = (prefix, node_kind)
+        return name
+
     if source.is_dir():
         files: dict[str, bytes] = {}
         total = 0
-        for path in sorted(source.rglob("*")):
-            if path.is_symlink():
-                raise ValueError("package symlinks are unsupported")
-            if path.is_file():
-                total += path.stat().st_size
-                if total > MAX_UNCOMPRESSED:
+        entries = 0
+
+        def walk_error(error: OSError) -> None:
+            raise error
+
+        for directory, dirs, leaves in os.walk(source, followlinks=False, onerror=walk_error):
+            entries += len(dirs) + len(leaves)
+            if entries > MAX_FILES:
+                raise ValueError("package exceeds the file-count limit")
+            for name in sorted(dirs + leaves):
+                path = Path(directory) / name
+                if path.is_symlink():
+                    raise ValueError("package symlinks are unsupported")
+                if name in dirs:
+                    continue
+                relative = register(path.relative_to(source).as_posix())
+                if path.stat().st_size > MAX_UNCOMPRESSED - total:
                     raise ValueError("package exceeds the uncompressed-size limit")
-                relative = path.relative_to(source).as_posix()
-                files[relative] = path.read_bytes()
-                if len(files) > MAX_FILES:
-                    raise ValueError("package exceeds the file-count limit")
+                raw = read_bytes(path, MAX_UNCOMPRESSED - total)
+                total += len(raw)
+                files[relative] = raw
         return files, str(source)
     if source.is_file() and source.suffix.casefold() in {".zip", ".xpi", ".crx"}:
         files = {}
@@ -102,13 +141,25 @@ def _read_package(source: Path) -> tuple[dict[str, bytes], str]:
             if sum(info.file_size for info in infos) > MAX_UNCOMPRESSED:
                 raise ValueError("package exceeds the uncompressed-size limit")
             for info in infos:
+                mode = (info.external_attr >> 16) & 0o170000
+                if mode not in {0, stat.S_IFREG, stat.S_IFDIR}:
+                    raise ValueError("package symlinks and special files are unsupported")
+                if info.flag_bits & 1:
+                    raise ValueError("encrypted package members are unsupported")
                 if info.is_dir():
+                    register(info.filename.rstrip("/"), "directory")
                     continue
-                name = _safe_name(info.filename)
-                key = name.casefold()
-                if any(existing.casefold() == key for existing in files):
-                    raise ValueError(f"duplicate package member path: {name}")
-                files[name] = archive.read(info)
+                name = register(info.filename)
+                try:
+                    with archive.open(info) as member:
+                        raw = member.read(info.file_size + 1)
+                except (RuntimeError, NotImplementedError) as exc:
+                    raise ValueError(
+                        "package member encryption/compression is unsupported"
+                    ) from exc
+                if len(raw) != info.file_size:
+                    raise ValueError("package member size differs from its declared size")
+                files[name] = raw
         return files, str(source)
     raise ValueError("source must be an extension directory or ZIP, XPI, or CRX archive")
 
@@ -120,9 +171,11 @@ def _manifest(files: dict[str, bytes]) -> dict[str, Any]:
         if nested:
             raise ValueError("manifest.json must be at the package root")
         raise ValueError("manifest.json is missing")
+    if candidates != ["manifest.json"]:
+        raise ValueError("manifest.json must use its exact lowercase package name")
     try:
-        data = json.loads(files[candidates[0]].decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        data = parse_json(files[candidates[0]])
+    except (UnicodeError, ValueError) as exc:
         raise ValueError(f"manifest.json is not valid UTF-8 JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise TypeError("manifest.json must contain an object")
@@ -130,9 +183,15 @@ def _manifest(files: dict[str, bytes]) -> dict[str, Any]:
 
 
 def load_policy(path: Path) -> dict[str, Any]:
-    raw = path.read_bytes()
-    data = json.loads(raw.decode("utf-8"))
-    if not isinstance(data, dict) or data.get("schema_version") != 1:
+    return _validate_policy(load_json(path))
+
+
+def _validate_policy(profile: Any) -> dict[str, Any]:
+    validate_json(profile)
+    if not isinstance(profile, dict):
+        raise TypeError("policy profile must be a schema version 1 object")
+    data = {key: item for key, item in profile.items() if key != "sha256"}
+    if type(data.get("schema_version")) is not int or data.get("schema_version") != 1:
         raise ValueError("policy profile must be a schema version 1 object")
     profile_id = data.get("id")
     if not isinstance(profile_id, str) or not profile_id.strip():
@@ -141,7 +200,8 @@ def load_policy(path: Path) -> dict[str, Any]:
     if not isinstance(reviewed_at, str):
         raise TypeError("policy profile requires a reviewed_at date")
     try:
-        date.fromisoformat(reviewed_at)
+        if date.fromisoformat(reviewed_at).isoformat() != reviewed_at:
+            raise ValueError("noncanonical date")
     except ValueError as exc:
         raise ValueError("policy profile reviewed_at must be an ISO date") from exc
     targets = data.get("targets")
@@ -150,6 +210,7 @@ def load_policy(path: Path) -> dict[str, Any]:
         or not targets
         or not all(isinstance(target, str) for target in targets)
         or not set(targets) <= TARGETS
+        or len(set(targets)) != len(targets)
     ):
         raise ValueError(f"policy targets must be selected from: {', '.join(sorted(TARGETS))}")
     sources = data.get("sources", [])
@@ -172,6 +233,10 @@ def load_policy(path: Path) -> dict[str, Any]:
                 isinstance(requirement, str) and requirement.strip() for requirement in requirements
             ):
                 raise TypeError(f"{key}.{target} must be a string list")
+            if key == "required_manifest_fields" and any(
+                any(not part for part in requirement.split(".")) for requirement in requirements
+            ):
+                raise ValueError("manifest policy paths must use nonempty dotted components")
             if key == "required_files":
                 for requirement in requirements:
                     if _safe_name(requirement) != requirement.replace("\\", "/"):
@@ -180,12 +245,18 @@ def load_policy(path: Path) -> dict[str, Any]:
                         )
     overrides = data.get("severity_overrides", {})
     if not isinstance(overrides, dict) or not all(
-        isinstance(code, str) and severity in {"error", "warning"}
+        isinstance(code, str)
+        and bool(code)
+        and isinstance(severity, str)
+        and severity in {"error", "warning"}
         for code, severity in overrides.items()
     ):
         raise ValueError("severity_overrides must map finding codes to error or warning")
     canonical = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-    return {**data, "sha256": hashlib.sha256(canonical).hexdigest()}
+    digest = hashlib.sha256(canonical).hexdigest()
+    if "sha256" in profile and profile["sha256"] != digest:
+        raise ValueError("policy fingerprint differs from its content")
+    return {**data, "sha256": digest}
 
 
 def _manifest_value(manifest: dict[str, Any], dotted_path: str) -> Any:
@@ -241,6 +312,18 @@ def _entrypoint_findings(
             if key == "default_popup" and value[key] == "":
                 continue
             reference(value[key], f"{parent}.{key}")
+    background = manifest.get("background")
+    if isinstance(background, dict):
+        if "page" in background:
+            reference(background["page"], "background.page")
+        if "scripts" in background:
+            if not isinstance(background["scripts"], list):
+                error(
+                    "entrypoint-shape", "background.scripts", "Background scripts must be an array."
+                )
+            else:
+                for index, value in enumerate(background["scripts"]):
+                    reference(value, f"background.scripts.{index}")
     for key in ("options_page", "devtools_page"):
         if key in manifest:
             reference(manifest[key], key)
@@ -275,6 +358,10 @@ def analyze(
     as_of: str | None = None,
     policy_max_age: int = 90,
 ) -> dict[str, Any]:
+    if not isinstance(targets, set) or any(not isinstance(t, str) for t in targets):
+        raise ValueError("targets must be a set of known store names")
+    if policy is not None:
+        policy = _validate_policy(policy)
     unknown = targets - TARGETS
     if not targets or unknown:
         raise ValueError(f"targets must be selected from: {', '.join(sorted(TARGETS))}")
@@ -284,10 +371,21 @@ def analyze(
     findings.extend(_entrypoint_findings(manifest, files, targets))
     all_targets = sorted(targets)
 
-    if manifest.get("manifest_version") != 3:
+    manifest_version = manifest.get("manifest_version")
+    unsupported = {
+        target
+        for target in targets
+        if type(manifest_version) is not int
+        or manifest_version not in ({2, 3} if target == "firefox" else {3})
+    }
+    if unsupported:
         findings.append(
             _finding(
-                "error", "manifest-version", "Manifest V3 is required.", "manifest_version", targets
+                "error",
+                "manifest-version",
+                "Selected targets require Manifest V3 for new Chromium-store submissions; Firefox accepts V2 or V3.",
+                "manifest_version",
+                unsupported,
             )
         )
     for key in ("name", "description", "version"):
@@ -295,16 +393,23 @@ def analyze(
             findings.append(
                 _finding("error", f"missing-{key}", f"{key} is required.", key, targets)
             )
-    if isinstance(manifest.get("version"), str) and not VERSION.fullmatch(manifest["version"]):
-        findings.append(
-            _finding(
-                "error",
-                "invalid-version",
-                "Version must contain one to four numeric parts.",
-                "version",
-                targets,
+    version = manifest.get("version")
+    if isinstance(version, str):
+        invalid = set(targets) if not VERSION.fullmatch(version) else set()
+        if not invalid:
+            parts = [int(part) for part in version.split(".")]
+            if max(parts) > 65535 or not any(parts):
+                invalid = targets & {"chrome", "edge"}
+        if invalid:
+            findings.append(
+                _finding(
+                    "error",
+                    "invalid-version",
+                    "Version must match the selected target's bounded numeric version format.",
+                    "version",
+                    invalid,
+                )
             )
-        )
 
     permissions = manifest.get("permissions", [])
     host_permissions = manifest.get("host_permissions", [])
@@ -354,18 +459,96 @@ def analyze(
                 )
             )
 
+    for field, code in (
+        ("optional_permissions", "optional-permissions-shape"),
+        ("optional_host_permissions", "optional-host-permissions-shape"),
+    ):
+        raw = manifest.get(field, [])
+        if not isinstance(raw, list) or any(not isinstance(v, str) for v in raw):
+            findings.append(
+                _finding(
+                    "error", code, "Optional declarations must be string arrays.", field, targets
+                )
+            )
+            continue
+        for value in sorted(set(raw)):
+            if field == "optional_permissions" and value in HIGH_RISK_PERMISSIONS:
+                findings.append(
+                    _finding(
+                        "warning",
+                        "sensitive-optional-permission",
+                        "A potentially requested sensitive permission needs human justification.",
+                        value,
+                        targets,
+                    )
+                )
+            if value in {"<all_urls>", "http://*/*", "https://*/*", "*://*/*"}:
+                findings.append(
+                    _finding(
+                        "warning",
+                        "broad-optional-host-access",
+                        "Potential broad host access needs human review.",
+                        value,
+                        targets,
+                    )
+                )
+    if manifest_version == 2:
+        for value in sorted(set(permissions)):
+            if value in {"<all_urls>", "http://*/*", "https://*/*", "*://*/*"}:
+                findings.append(
+                    _finding(
+                        "warning",
+                        "broad-host-access",
+                        "Broad host access needs human review.",
+                        value,
+                        targets,
+                    )
+                )
+
     csp = manifest.get("content_security_policy", {})
-    csp_text = json.dumps(csp, sort_keys=True)
-    if re.search(r"https?://|unsafe-eval", csp_text, re.IGNORECASE):
+    if isinstance(csp, dict):
+        page_csp = csp.get("extension_pages", "")
+        malformed_csp = any(not isinstance(v, str) for v in csp.values())
+    else:
+        page_csp = csp
+        malformed_csp = not isinstance(csp, str)
+    if malformed_csp:
         findings.append(
             _finding(
                 "error",
-                "unsafe-csp",
-                "The extension CSP references remote code or unsafe-eval.",
-                csp_text,
+                "csp-shape",
+                "CSP declarations must contain strings.",
+                "content_security_policy",
                 targets,
             )
         )
+    elif isinstance(page_csp, str):
+        directives: dict[str, list[str]] = {}
+        for directive in page_csp.split(";"):
+            tokens = directive.lower().split()
+            if tokens:
+                directives.setdefault(tokens[0], tokens[1:])
+        # Only executable extension-page directives are inspected. Remote images,
+        # connections and the separate sandbox policy are not executable evidence.
+        sources = []
+        for name in (
+            "script-src",
+            "script-src-elem",
+            "script-src-attr",
+            "worker-src",
+            "object-src",
+        ):
+            sources.extend(directives.get(name, directives.get("default-src", [])))
+        if any(re.search(r"https?://|^https?:$|unsafe-eval", token) for token in sources):
+            findings.append(
+                _finding(
+                    "error",
+                    "unsafe-csp",
+                    "An extension-page executable CSP directive permits remote code or unsafe-eval.",
+                    page_csp,
+                    targets,
+                )
+            )
     for name, content in sorted(files.items()):
         if name.casefold().endswith((".js", ".mjs", ".cjs")):
             text = content.decode("utf-8", errors="replace")
@@ -477,6 +660,12 @@ def analyze(
             if finding["code"] in overrides:
                 finding["severity"] = overrides[finding["code"]]
 
+    # A finding identity is stable even when declarations or policy requirements repeat.
+    unique: dict[tuple[str, str, str, tuple[str, ...]], dict[str, Any]] = {}
+    for item in findings:
+        identity = (item["severity"], item["code"], item["evidence"], tuple(item["targets"]))
+        unique.setdefault(identity, item)
+    findings = list(unique.values())
     findings.sort(key=lambda item: (item["severity"] != "error", item["code"], item["evidence"]))
     counts = {
         level: sum(item["severity"] == level for item in findings) for level in ("error", "warning")
@@ -489,6 +678,17 @@ def analyze(
     ).hexdigest()
     return {
         "schema_version": 2,
+        "builtin_policy_snapshot": {
+            "reviewed_at": "2026-10-21",
+            "scope": "New submissions; conservative static checks, not store approval",
+            "sources": [
+                "https://developer.chrome.com/docs/extensions/reference/manifest/version",
+                "https://developer.chrome.com/docs/extensions/develop/migrate/mv2-deprecation-timeline",
+                "https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/manifest.json/version",
+                "https://blog.mozilla.org/en/firefox/firefox-manifest-v3-adblockers/",
+                "https://learn.microsoft.com/en-us/microsoft-edge/extensions/developer-guide/manifest-v3",
+            ],
+        },
         "permission_review": permission_review(manifest, files),
         "policy_review": policy_review(
             policy, as_of or datetime.now(timezone.utc).date().isoformat(), policy_max_age
@@ -522,26 +722,74 @@ def analyze(
 
 
 def compare_reports(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
-    if baseline.get("project") != PROJECT or baseline.get("schema_version") not in {1, 2}:
+    if (
+        not isinstance(baseline, dict)
+        or baseline.get("project") != PROJECT
+        or type(baseline.get("schema_version")) is not int
+        or baseline.get("schema_version") not in {1, 2}
+    ):
         raise ValueError("baseline must be an Extension Store Readiness Auditor report")
+    targets = baseline.get("targets")
+    if (
+        not isinstance(targets, list)
+        or not targets
+        or any(not isinstance(t, str) for t in targets)
+        or not set(targets) <= TARGETS
+        or len(set(targets)) != len(targets)
+    ):
+        raise ValueError("baseline targets must name its audit scope")
+    if not isinstance(baseline.get("findings"), list):
+        raise TypeError("baseline requires an explicit findings array")
+    shared = set(current["targets"]) & set(targets)
 
-    def key(finding: dict[str, Any]) -> tuple[str, str, str, tuple[str, ...]]:
-        try:
-            return (
-                str(finding["severity"]),
-                str(finding["code"]),
-                str(finding["evidence"]),
-                tuple(sorted(str(target) for target in finding["targets"])),
-            )
-        except (KeyError, TypeError) as exc:
-            raise ValueError("baseline contains an invalid finding") from exc
+    def key(
+        finding: dict[str, Any], allowed: set[str], scope: set[str]
+    ) -> tuple[str, str, str, tuple[str, ...]]:
+        if (
+            not isinstance(finding, dict)
+            or finding.get("severity") not in ("error", "warning")
+            or not isinstance(finding.get("code"), str)
+            or not finding["code"]
+            or not isinstance(finding.get("evidence"), str)
+            or not isinstance(finding.get("targets"), list)
+            or not finding["targets"]
+            or any(not isinstance(t, str) for t in finding["targets"])
+            or not set(finding["targets"]) <= allowed
+            or len(set(finding["targets"])) != len(finding["targets"])
+        ):
+            raise ValueError("baseline contains an invalid finding")
+        return (
+            finding["severity"],
+            finding["code"],
+            finding["evidence"],
+            tuple(sorted(set(finding["targets"]) & scope)),
+        )
 
-    current_by_key = {key(finding): finding for finding in current["findings"]}
-    baseline_by_key = {key(finding): finding for finding in baseline.get("findings", [])}
+    keys = [key(f, set(targets), set(targets)) for f in baseline["findings"]]
+    if len(keys) != len(set(keys)):
+        raise ValueError("baseline contains duplicate finding identities")
+    current_by_key = {
+        key(f, set(current["targets"]), shared): f
+        for f in current["findings"]
+        if set(f["targets"]) & shared
+    }
+    baseline_by_key = {
+        key(f, set(targets), shared): f for f in baseline["findings"] if set(f["targets"]) & shared
+    }
+    comparable_baseline = sum(bool(set(f["targets"]) & shared) for f in baseline["findings"])
+    if len(baseline_by_key) != comparable_baseline:
+        raise ValueError("baseline has ambiguous identities within the shared target scope")
     new_keys = sorted(current_by_key.keys() - baseline_by_key.keys())
     resolved_keys = sorted(baseline_by_key.keys() - current_by_key.keys())
     unchanged_keys = sorted(current_by_key.keys() & baseline_by_key.keys())
     return {
+        "status": "compared" if shared else "unavailable-target-scope",
+        "shared_targets": sorted(shared),
+        "current_only_targets": sorted(set(current["targets"]) - set(targets)),
+        "baseline_only_targets": sorted(set(targets) - set(current["targets"])),
+        "not_rechecked": [f for f in baseline["findings"] if not set(f["targets"]) & shared],
+        "not_compared": [f for f in current["findings"] if not set(f["targets"]) & shared],
+        "boundary": "Finding states apply only to shared store targets. Findings outside the shared scope are not classified as new or resolved.",
         "new": [current_by_key[item] for item in new_keys],
         "resolved": [baseline_by_key[item] for item in resolved_keys],
         "unchanged": [current_by_key[item] for item in unchanged_keys],
@@ -554,7 +802,7 @@ def compare_reports(current: dict[str, Any], baseline: dict[str, Any]) -> dict[s
 
 
 def render_json(report: dict[str, Any]) -> str:
-    return json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+    return json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -571,7 +819,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         profile = report["policy_profile"]
         lines.extend(
             [
-                f"Policy: `{profile['id']}` reviewed {profile['reviewed_at']} (`{profile['sha256']}`)",
+                f"Policy: {code_span(profile['id'])} reviewed {profile['reviewed_at']} (`{profile['sha256']}`)",
             ]
         )
     lines.extend(["", "## Findings", ""])
@@ -580,7 +828,7 @@ def render_markdown(report: dict[str, Any]) -> str:
     for item in report["findings"]:
         lines.append(
             f"- **{item['severity'].upper()} {item['code']}** — {item['message']} "
-            f"Evidence: `{item['evidence']}`. Targets: {', '.join(item['targets'])}."
+            f"Evidence: {code_span(item['evidence'])}. Targets: {', '.join(item['targets'])}."
         )
     if "comparison" in report:
         comparison = report["comparison"]
@@ -588,6 +836,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             [
                 "",
                 "## Baseline Comparison",
+                "",
+                f"Shared targets: {', '.join(comparison['shared_targets']) or 'none; comparison unavailable'}",
+                comparison["boundary"],
                 "",
                 (
                     f"New: {comparison['summary']['new']} | "
@@ -598,18 +849,22 @@ def render_markdown(report: dict[str, Any]) -> str:
         )
         for state in ("new", "resolved"):
             for item in comparison[state]:
-                lines.append(f"- **{state.title()} {item['code']}** — `{item['evidence']}`")
+                lines.append(
+                    f"- **{state.title()}** {code_span(item['code'])} — {code_span(item['evidence'])}"
+                )
     lines += [
         "",
         "## Permission and policy review",
         "",
-        json.dumps(
-            {
-                "permissions": report.get("permission_review"),
-                "permission_diff": report.get("permission_diff"),
-                "policy": report.get("policy_review"),
-            },
-            indent=2,
+        json_fence(
+            json.dumps(
+                {
+                    "permissions": report.get("permission_review"),
+                    "permission_diff": report.get("permission_diff"),
+                    "policy": report.get("policy_review"),
+                },
+                indent=2,
+            )
         ),
         "",
         "## Boundary",

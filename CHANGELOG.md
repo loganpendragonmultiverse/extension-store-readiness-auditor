@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.0 - 2026-10-21
+
+- Keep repeated declarations/policy requirements baseline-compatible and scan namespace line evidence in linear text intervals.
+
+- Add dated, target-specific manifest/version checks and optional-permission risk evidence for new submissions.
+- Validate declared background pages/scripts and bounded directory/archive boundaries consistently.
+- Reject ambiguous JSON and incomplete/incompatible baselines, preserve existing outputs and render literal evidence.
+- Ship usable installed examples and complete release documentation with official tag checksums.
+
 ## 1.3.0 - 2026-10-16
 
 - Preserve omitted or empty action popup declarations as valid no-popup behavior.

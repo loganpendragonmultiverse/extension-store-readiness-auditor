@@ -3,7 +3,9 @@
   "name": "Example Extension",
   "description": "A minimal package for demonstrating the auditor.",
   "version": "1.0.0",
-  "icons": {
-    "128": "icon.png"
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "fixture@example.test"
+    }
   }
 }
